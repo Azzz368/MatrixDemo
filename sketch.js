@@ -24,13 +24,23 @@ let micPhaseMaxLevel = 0.3; // 将 0..0.3 的音量映射到 0..TWO_PI
 
 // 新增：音量剧烈程度与G键扭动增强
 let audioLevelPrev = 0;
-let audioSeverity = 0.5;       // 0..1，表示音量突变强度
+let audioSeverity = 0.6;       // 0..1，表示音量突变强度
 let severityGain = 50;       // 越大对突变越敏感
 let gBoostActive = false;    // 按住G时反向并增强扭动
 
+// 新增：t 步长分母动态控制（音量阈值触发，2s 恢复）
+let tStepDenomBase = 30;           // 正常分母 30（请保留用户当前值）
+let tStepDenomTriggered = 95;      // 触发时的分母 80
+let tStepDenomCurrent = 30;        // 当前使用的分母（帧更新）
+let tStepRecoveryMs = 0;           // 剩余恢复时间（ms）
+const T_STEP_RECOVERY_MS = 1700;   // 总恢复时长（ms）
+
+// 新增：半径脉冲（音量阈值触发，1s 衰减）
+let radiusPulse = 1;         // >=1，触发时置为1.5，随后回落到1
+
 // 新增：基于摄像头灰度深度的点阵背景参数（密度与大小）
-let depthDotCell = 14;       // 点阵单元大小（像素，越大越稀疏）
-let depthDotSizeMin = 2;     // 最小点直径（像素）
+let depthDotCell = 20;       // 点阵单元大小（像素，越大越稀疏）
+let depthDotSizeMin = 3;     // 最小点直径（像素）
 let depthDotSizeMax = 10;    // 最大点直径（像素）
 let depthDotAlpha = 102;     // 点透明度（0..255）
 
@@ -135,10 +145,35 @@ function draw() {
     audioLevelPrev = cur;
   }
 
+  // 新增：音量阈值触发全局半径扩张（阈值0.415 → 触发2.1x），并在1s内线性回落
+  if (micLevelSmoothed >= 0.415) {
+    radiusPulse = max(radiusPulse, 2.1);
+  }
+  if (radiusPulse > 1) {
+    // 线性衰减：从1.5降到1，在1s内完成
+    const decayPerMs = 0.5 / 1000; // 每毫秒减少的半径倍率
+    radiusPulse = max(1, radiusPulse - decayPerMs * (deltaTime || 16.67));
+  }
+
+  // 新增：音量阈值触发 t 步长修改（>=0.410 → 立刻切到 80；在2s内恢复到 30）
+  if (micLevelSmoothed >= 0.420) {
+    tStepDenomCurrent = tStepDenomTriggered; // 立即使用 80
+    tStepRecoveryMs = T_STEP_RECOVERY_MS;    // 重置恢复计时
+  }
+  if (tStepRecoveryMs > 0) {
+    const dt = (deltaTime || 16.67);
+    tStepRecoveryMs = max(0, tStepRecoveryMs - dt);
+    const k = 1 - (tStepRecoveryMs / T_STEP_RECOVERY_MS); // 0→1
+    // 从 80 线性过渡回 30：current = 80 + k*(30-80)
+    tStepDenomCurrent = tStepDenomTriggered + k * (tStepDenomBase - tStepDenomTriggered);
+  } else {
+    tStepDenomCurrent = tStepDenomBase;
+  }
+
   updateFeatherPowerFromHands();
   updateCloudOffsetFromHands(); // 新增：根据手势更新点云偏移
 
-  // 合成点径控制（手势75% + W/S 25%），映射到尺寸缩放 0.6..2.0
+  // 合成点径控制（手势75% + W/S 25%），映射到尺寸缩放 0.6..4.5（你已调大）
   {
     const mix = constrain(0.75 * handSizeNorm + 0.25 * wsSizeNorm, 0, 1);
     const sizeScale = lerp(0.6, 4.5, mix);
@@ -166,7 +201,7 @@ function drawMainScene() {
   image(bgLayer, 0, 0);
 
   // 推进时间（用于背景动画）
-  t += PI / 40;
+  t += PI / tStepDenomCurrent;
 }
 
 // 左上角音量 HUD（只显示数字，隐藏滑动条）
@@ -194,7 +229,7 @@ function drawPlayButton() {
   resetMatrix();
   push();
   noStroke();
-  fill(0, 150, 255, 127); // 亮蓝，50% 透明
+  fill(0, 150, 255, 80); // 亮蓝，50% 透明
   circle(playButtonCenter.x, playButtonCenter.y, playButtonRadius * 2);
 
   // 绘制播放/暂停图标
@@ -277,16 +312,16 @@ function updateDepthLayer() {
 
   const cell = max(6, depthDotCell | 0);
 
-  // 基础时间与速度因子（音量剧烈程度 0..1 → 0.65x..1.5x）
+  // 基础时间与速度因子（音量剧烈程度 0..1 → 0.5x..1.5x）
   const timeBase = t;
-  const speedFactor = lerp(0.65, 1.5, constrain(audioSeverity, 0, 1));
+  const speedFactor = lerp(0.5, 1.5, constrain(audioSeverity, 0, 1));
   const timeAdj = timeBase * speedFactor;
 
-  const warpAmp = 10;     // 位置扭曲振幅（受音量剧烈程度与G键影响，在上层计算）
+  const warpAmp = 10;     // 位置扭曲振幅
   const wobbleAmp = 5;    // 点位抖动幅度
-  const sizeBeat = 0.8;  // 呼吸幅度（相对尺寸）
+  const sizeBeat = 0.8;   // 呼吸幅度（相对尺寸）
   const hueShiftBase = 220; // 基础色相
-  const hueRange = 160;     // 色相摆动范围（受剧烈程度放大）
+  const hueRange = 160;     // 色相摆动范围
   const satVal = 90;        // 饱和度（%）
 
   // 拖影：轻度淡化旧内容
@@ -300,22 +335,24 @@ function updateDepthLayer() {
   bgLayer.push();
   bgLayer.colorMode(HSB, 360, 100, 100, 255);
   bgLayer.noStroke();
-    // 叠加增强眩晕感
-    bgLayer.blendMode(ADD);
+  bgLayer.blendMode(ADD);
 
-  // 旋转与扭曲振幅：受音量剧烈程度与G键影响
+  // 旋转与扭曲（含G键反向与速度因子）
   const cx = width / 2;
   const cy = height / 2;
-  const dir = gBoostActive ? -1 : 1;                  // G键时反向
-  const rotMax = 0.35;                                 // 最大额外旋转（弧度）
-  const rotBase = 0.05;                                // 基础微旋
+  const dir = gBoostActive ? -1 : 1;
+  const rotMax = 0.35;
+  const rotBase = 0.05;
   const rotSpeed = 0.9;
   const rotAngle = dir * (rotBase + rotMax * audioSeverity) * sin(timeAdj * rotSpeed + audioPhase * 0.5);
   const warpAmpEff = warpAmp * (1 + 2.0 * audioSeverity) * (gBoostActive ? 2.5 : 1.0);
-  const hueRangeEff = hueRange * (1 + 1.6 * audioSeverity); // 面积与色彩更明显
+  const hueRangeEff = hueRange * (1 + 1.6 * audioSeverity);
 
   const cosA = cos(rotAngle);
   const sinA = sin(rotAngle);
+
+  // 抖动幅度：仅由音量剧烈程度驱动，并缩放至0.7当前强度
+  const jitterScale = 1 + 0.7 * audioSeverity; // 原为（含多因素）更强，这里仅保留音频并降为0.7倍
 
   for (let y = 0; y < height; y += cell) {
     for (let x = 0; x < width; x += cell) {
@@ -325,7 +362,7 @@ function updateDepthLayer() {
       const xR = px * cosA - py * sinA + cx;
       const yR = px * sinA + py * cosA + cy;
 
-      // 时空扭曲到视频采样坐标（G键期间反向加剧），时间使用 timeAdj 控制速度
+      // 时空扭曲到视频采样坐标（使用 timeAdj 控制速度）
       const wx = xR
         + dir * warpAmpEff * sin(yR * 0.02 + timeAdj * 0.9)
         + 6 * sin((xR + yR) * 0.01 - timeAdj * 0.6);
@@ -343,14 +380,14 @@ function updateDepthLayer() {
       let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b; // 0..255
       luminance = constrain(luminance, 0, 255);
 
-      // 呼吸式尺寸变化 + 点径控制采用有效范围（手势65% + W/S 35%）
+      // 呼吸式尺寸变化 + 有效点径 + 全局半径脉冲
       const beat = 1.0 + sizeBeat * sin(timeBase * 1.3 + (x + y) * 0.015 + audioPhase);
       const baseSize = map(luminance, 0, 255, effectiveDotSizeMin, effectiveDotSizeMax);
-      const dotSize = baseSize * beat;
+      const dotSize = baseSize * beat * radiusPulse;
 
-      // 点位抖动：速度受音量剧烈程度影响（使用 timeAdj）
-      const jx = wobbleAmp * sin(timeAdj * 1.1 + y * 0.03);
-      const jy = wobbleAmp * cos(timeAdj * 1.0 + x * 0.03);
+      // 抖动：速度用 timeAdj，幅度用 jitterScale（无手部扰流与脉冲）
+      const jx = wobbleAmp * jitterScale * sin(timeAdj * 1.1 + y * 0.03);
+      const jy = wobbleAmp * jitterScale * cos(timeAdj * 1.0 + x * 0.03);
 
       // 色相循环：受剧烈程度放大色相幅度（颜色速度保持原样）
       const hueVal = (hueShiftBase
@@ -515,7 +552,7 @@ function drawHandUI() {
       const offset = 40;
       const labelX = midX - sin(angle) * offset;
       const labelY = midY + cos(angle) * offset;
-      text(`Power - ${featherPower.toFixed(2)}`, labelX, labelY);
+      text(`Power - ${distCanvas.toFixed(2)}`, labelX, labelY);
       
       // 音频音量显示（放在featherPower下方并列）
       textSize(20);
