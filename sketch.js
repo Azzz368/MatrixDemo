@@ -60,6 +60,21 @@ let lastHandCenterX = 0;
 let lastHandCenterY = 0;
 let isFirstHandDetect = true;
 
+// 新增：手势连线方向驱动的全局位移（平滑）
+let handDirOffsetX = 0;
+let handDirOffsetY = 0;
+let targetHandDirOffsetX = 0;
+let targetHandDirOffsetY = 0;
+let maxHandDirOffset = 120; // 最大偏移幅度（像素）
+
+// 新增：手势驱动的呼吸波方向（单位向量，默认沿对角线右下→左上）
+let waveDirX = 0.7071;
+let waveDirY = 0.7071;
+let targetWaveDirX = 0.7071;
+let targetWaveDirY = 0.7071;
+let waveDirSmoothing = 0.20;
+const WAVE_SPATIAL_K = 0.0212; // ≈ 0.015 * sqrt(2)，匹配原 (x+y)*0.015 的空间频率
+
 // 新增：渲染优化（缓存摄像头点阵层、手势平滑）
 let bgLayer;
 let bgUpdateInterval = 4; // 每4帧重绘一次摄像头点阵
@@ -172,6 +187,8 @@ function draw() {
 
   updateFeatherPowerFromHands();
   updateCloudOffsetFromHands(); // 新增：根据手势更新点云偏移
+  updateHandDirectionOffset();  // 新增：根据手势连线方向更新全局位移
+  updateWaveDirectionFromHand(); // 新增：根据手势连线方向更新呼吸波方向
 
   // 合成点径控制（手势75% + W/S 25%），映射到尺寸缩放 0.6..4.5（你已调大）
   {
@@ -362,18 +379,25 @@ function updateDepthLayer() {
       const xR = px * cosA - py * sinA + cx;
       const yR = px * sinA + py * cosA + cy;
 
+      // 新增：叠加手势连线方向的全局位移
+      const xR2 = xR + handDirOffsetX;
+      const yR2 = yR + handDirOffsetY;
+
       // 时空扭曲到视频采样坐标（使用 timeAdj 控制速度）
-      const wx = xR
-        + dir * warpAmpEff * sin(yR * 0.02 + timeAdj * 0.9)
-        + 6 * sin((xR + yR) * 0.01 - timeAdj * 0.6);
-      const wy = yR
-        + dir * warpAmpEff * cos(xR * 0.02 - timeAdj * 0.8)
-        + 6 * cos((xR - yR) * 0.012 + timeAdj * 0.7);
+      const wx = xR2
+        + dir * warpAmpEff * sin(yR2 * 0.02 + timeAdj * 0.9)
+        + 6 * sin((xR2 + yR2) * 0.01 - timeAdj * 0.6);
+      const wy = yR2
+        + dir * warpAmpEff * cos(xR2 * 0.02 - timeAdj * 0.8)
+        + 6 * cos((xR2 - yR2) * 0.012 + timeAdj * 0.7);
 
-      const vx = floor(map(wx, 0, width, 0, vw - 1));
-      const vy = floor(map(wy, 0, height, 0, vh - 1));
+      let vx = floor(map(wx, 0, width, 0, vw - 1));
+      let vy = floor(map(wy, 0, height, 0, vh - 1));
+      // 新增：轻度 clamp 保护，避免越界采样
+      const vxClamped = constrain(vx, 0, vw - 1);
+      const vyClamped = constrain(vy, 0, vh - 1);
 
-      const idx = 4 * (vy * vw + vx);
+      const idx = 4 * (vyClamped * vw + vxClamped);
       const r = video.pixels[idx];
       const g = video.pixels[idx + 1];
       const b = video.pixels[idx + 2];
@@ -381,7 +405,8 @@ function updateDepthLayer() {
       luminance = constrain(luminance, 0, 255);
 
       // 呼吸式尺寸变化 + 有效点径 + 全局半径脉冲
-      const beat = 1.0 + sizeBeat * sin(timeBase * 1.3 + (x + y) * 0.015 + audioPhase);
+      const spatial = (waveDirX * x + waveDirY * y) * WAVE_SPATIAL_K;
+      const beat = 1.0 + sizeBeat * sin(timeBase * 1.3 + spatial + audioPhase);
       const baseSize = map(luminance, 0, 255, effectiveDotSizeMin, effectiveDotSizeMax);
       const dotSize = baseSize * beat * radiusPulse;
 
@@ -398,7 +423,8 @@ function updateDepthLayer() {
       const bri = map(luminance, 0, 255, 20, 100);
       bgLayer.fill(hueVal, satVal, bri, depthDotAlpha);
 
-      bgLayer.circle(x + jx, y + jy, dotSize);
+      // 新增：绘制也叠加小幅手势方向位移，增强整体位移感
+      bgLayer.circle(x + jx + handDirOffsetX * 0.25, y + jy + handDirOffsetY * 0.25, dotSize);
     }
   }
   bgLayer.pop();
@@ -453,6 +479,82 @@ function updateCloudOffsetFromHands() {
   // 平滑更新实际偏移
   cloudOffsetX = lerp(cloudOffsetX, targetCloudOffsetX, 0.1);
   cloudOffsetY = lerp(cloudOffsetY, targetCloudOffsetY, 0.1);
+}
+
+// 新增：根据手势可视化连线方向更新全局位移
+function updateHandDirectionOffset() {
+  let targetX = 0;
+  let targetY = 0;
+
+  if (hands.length > 0) {
+    let hand = hands[0];
+    let thumbTip = hand.keypoints[4];
+    let indexTip = hand.keypoints[8];
+    if (thumbTip && indexTip) {
+      const thumb = mapVideoToCanvas(thumbTip.x, thumbTip.y);
+      const index = mapVideoToCanvas(indexTip.x, indexTip.y);
+
+      const dx = thumb.x - index.x;  // 指向与 UI 连线一致
+      const dy = thumb.y - index.y;
+      const dist = sqrt(dx * dx + dy * dy);
+
+      // 0..1 强度（与 updateFeatherPowerFromHands 的窗口保持相近）
+      let strength = map(dist, 10, 300, 0, 1);
+      strength = constrain(strength, 0, 1);
+
+      const len = max(1, dist);
+      let nx = dx / len;
+      let ny = dy / len;
+
+      const dir = gBoostActive ? -1 : 1; // G 键反向
+      const audioScale = lerp(0.9, 1.4, constrain(audioSeverity, 0, 1));
+      const boost = gBoostActive ? 1.6 : 1.0;
+      const amplitude = maxHandDirOffset * strength * audioScale * boost;
+
+      targetX = dir * nx * amplitude;
+      targetY = dir * ny * amplitude;
+    }
+  }
+
+  targetHandDirOffsetX = targetX;
+  targetHandDirOffsetY = targetY;
+
+  // 平滑过渡，避免抖动
+  handDirOffsetX = lerp(handDirOffsetX, targetHandDirOffsetX, 0.18);
+  handDirOffsetY = lerp(handDirOffsetY, targetHandDirOffsetY, 0.18);
+}
+
+// 新增：根据手势更新“呼吸”传播方向（单位向量），默认维持原对角方向
+function updateWaveDirectionFromHand() {
+  // 默认方向与原 (x+y) 一致（梯度为 [1,1]），保持既有美学
+  let tx = 0.7071;
+  let ty = 0.7071;
+
+  if (hands.length > 0) {
+    let hand = hands[0];
+    let thumbTip = hand.keypoints[4];
+    let indexTip = hand.keypoints[8];
+    if (thumbTip && indexTip) {
+      const thumb = mapVideoToCanvas(thumbTip.x, thumbTip.y);
+      const index = mapVideoToCanvas(indexTip.x, indexTip.y);
+      const dx = thumb.x - index.x;
+      const dy = thumb.y - index.y;
+      const dist = sqrt(dx * dx + dy * dy);
+      if (dist > 8) {
+        tx = dx / dist;
+        ty = dy / dist;
+      }
+    }
+  }
+
+  // 平滑过渡，避免卡顿与方向抖动
+  targetWaveDirX = tx;
+  targetWaveDirY = ty;
+  waveDirX = lerp(waveDirX, targetWaveDirX, waveDirSmoothing);
+  waveDirY = lerp(waveDirY, targetWaveDirY, waveDirSmoothing);
+  const len = max(1e-6, sqrt(waveDirX * waveDirX + waveDirY * waveDirY));
+  waveDirX /= len;
+  waveDirY /= len;
 }
 
 // 处理拖拽到画布的文件
