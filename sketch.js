@@ -20,12 +20,14 @@ let micLevelRaw = 0; // 复用命名：表示当前音频源的原始幅度
 let micLevelSmoothed = 0; // 复用命名：平滑后的幅度
 let audioPhase = 0; // 将音量映射为背景 sin 的自变量
 let micPhaseMaxLevel = 0.3; // 将 0..0.3 的音量映射到 0..TWO_PI
+let soundLoadedAt = 0; // 新增：音频加载完成时间戳（用于边框淡入）
 
 // 新增：音量剧烈程度与G键扭动增强
 let audioLevelPrev = 0;
 let audioSeverity = 0.6;       // 0..1，表示音量突变强度
 let severityGain = 50;       // 越大对突变越敏感
-let gBoostActive = false;    // 按住G时反向并增强扭动
+let gHoldActive = false;     // 按住 G：临时加速 t（tStepDenomCurrent=10）
+const T_STEP_DENOM_G_HOLD = 6;
 
 // 新增：t 步长分母动态控制（音量阈值触发，2s 恢复）
 let tStepDenomBase = 30;           // 正常分母 30（请保留用户当前值）
@@ -76,7 +78,7 @@ const WAVE_SPATIAL_K = 0.0212; // ≈ 0.015 * sqrt(2)，匹配原 (x+y)*0.015 �
 
 // 新增：封面“stitch”动效参数（Maison Margiela 风格）
 const STITCH_LEN = 80;   // 矩形长度
-const STITCH_THICK = 8; // 矩形宽度（厚度）
+const STITCH_THICK = 3; // 矩形宽度（厚度）
 const STITCH_SMOOTH = 0.18; // 插值平滑
 let stitchParam = 0;     // 0→尾端在屏幕角；1→靠近中心矩形角
 
@@ -95,8 +97,8 @@ let coverState = 'waiting'; // 'waiting' | 'fading' | 'done'
 let coverOpacity = 255;
 const COVER_FADE_MS = 2000;
 let coverFadeStartMs = 0;
-const COVER_CLICK_W = 800;
-const COVER_CLICK_H = 70;
+const COVER_CLICK_W = 1200;
+const COVER_CLICK_H = 300;
 
 function preload() {
   handPose = ml5.handPose();
@@ -207,6 +209,11 @@ function draw() {
     tStepDenomCurrent = tStepDenomBase;
   }
 
+  // 新增：G 键按住时，强制使用更快的 t 步长分母（10）
+  if (gHoldActive) {
+    tStepDenomCurrent = T_STEP_DENOM_G_HOLD;
+  }
+
   updateFeatherPowerFromHands();
   updateCloudOffsetFromHands(); // 新增：根据手势更新点云偏移
   updateHandDirectionOffset();  // 新增：根据手势连线方向更新全局位移
@@ -287,6 +294,22 @@ function drawCoverOverlay() {
   // 新增：stitch 动效（先绘制在文字下层）
   drawCoverStitches(alpha);
 
+  // 新增：若已加载音频，给中心点击区域绘制极细银色边框（1s 淡入）
+  if (isSoundLoaded) {
+    const clickW = min(width * 0.8, COVER_CLICK_W);
+    const clickH = min(height * 0.35, COVER_CLICK_H);
+    const cx = width / 2;
+    const cy = height / 2;
+    const left = cx - clickW / 2;
+    const top = cy - clickH / 2;
+    const fadeK = constrain((millis() - soundLoadedAt) / 1000, 0, 1);
+    noFill();
+    stroke(192, 192, 192, alpha * fadeK);
+    strokeWeight(0.6);
+    rect(left, top, clickW, clickH);
+    noStroke();
+  }
+
   // 提示文字（白色，Times New Roman，20px，居中）
   fill(255, alpha);
   textAlign(CENTER, CENTER);
@@ -309,21 +332,33 @@ function drawCoverOverlay() {
 
 // 新增：绘制封面四个“stitch”灰色矩形（随鼠标距离插值位置）
 function drawCoverStitches(alpha) {
-  // 自适应中心点击区域
-  const clickW = min(width * 0.6, COVER_CLICK_W);
-  const clickH = min(height * 0.25, COVER_CLICK_H);
+  // 自适应中心点击区域（更大比例，受 1200×300 上限）
+  const clickW = min(width * 0.8, COVER_CLICK_W);
+  const clickH = min(height * 0.35, COVER_CLICK_H);
   const cx = width / 2;
   const cy = height / 2;
 
-  // 计算鼠标与中心矩形的最短距离（在矩形内为0）
+  // 中心矩形边界
   const left = cx - clickW / 2;
   const right = cx + clickW / 2;
   const top = cy - clickH / 2;
   const bottom = cy + clickH / 2;
-  const dx = max(max(left - mouseX, 0), mouseX - right);
-  const dy = max(max(top - mouseY, 0), mouseY - bottom);
-  const distToRect = sqrt(dx * dx + dy * dy);
-  const distMax = 0.6 * sqrt(width * width + height * height);
+
+  // 计算任意点到矩形的最短距离
+  function rectDist(px, py) {
+    const dx = max(max(left - px, 0), px - right);
+    const dy = max(max(top - py, 0), py - bottom);
+    return sqrt(dx * dx + dy * dy);
+  }
+
+  // 鼠标距离与最大距离（采用四个屏幕角中的最大值，保证边缘可达）
+  const distToRect = rectDist(mouseX, mouseY);
+  const distMax = max(
+    rectDist(0, 0),
+    rectDist(width, 0),
+    rectDist(0, height),
+    rectDist(width, height)
+  );
   const targetParam = constrain(distToRect / max(1, distMax), 0, 1);
   stitchParam = lerp(stitchParam, targetParam, STITCH_SMOOTH);
 
@@ -460,12 +495,12 @@ function updateDepthLayer() {
   // 旋转与扭曲（含G键反向与速度因子）
   const cx = width / 2;
   const cy = height / 2;
-  const dir = gBoostActive ? -1 : 1;
+  const dir = 1; // 取消 G 键反向效果
   const rotMax = 0.35;
   const rotBase = 0.05;
   const rotSpeed = 0.9;
   const rotAngle = dir * (rotBase + rotMax * audioSeverity) * sin(timeAdj * rotSpeed + audioPhase * 0.5);
-  const warpAmpEff = warpAmp * (1 + 2.0 * audioSeverity) * (gBoostActive ? 2.5 : 1.0);
+  const warpAmpEff = warpAmp * (1 + 2.0 * audioSeverity);
   const hueRangeEff = hueRange * (1 + 1.6 * audioSeverity);
 
   const cosA = cos(rotAngle);
@@ -609,9 +644,9 @@ function updateHandDirectionOffset() {
       let nx = dx / len;
       let ny = dy / len;
 
-      const dir = gBoostActive ? -1 : 1; // G 键反向
+      const dir = 1; // 取消 G 键反向
       const audioScale = lerp(0.9, 1.4, constrain(audioSeverity, 0, 1));
-      const boost = gBoostActive ? 1.6 : 1.0;
+      const boost = 1.0; // 取消 G 键振幅增强
       const amplitude = maxHandDirOffset * strength * audioScale * boost;
 
       targetX = dir * nx * amplitude;
@@ -680,6 +715,8 @@ function handleFile(file) {
       if (amplitudeAnalyzer) {
         amplitudeAnalyzer.setInput(sound);
       }
+      // 记录加载成功时间，用于银色边框的 1s 淡入
+      soundLoadedAt = millis();
     },
     (err) => {
       isSoundLoaded = false;
@@ -814,8 +851,8 @@ function mousePressed() {
 
   // 覆盖页点击：仅当处于等待状态时，点击屏幕中心区域开始淡出
   if (coverState === 'waiting') {
-    const clickW = min(width * 0.6, COVER_CLICK_W);
-    const clickH = min(height * 0.25, COVER_CLICK_H);
+    const clickW = min(width * 0.8, COVER_CLICK_W);
+    const clickH = min(height * 0.35, COVER_CLICK_H);
     const dx = abs(mouseX - width / 2);
     const dy = abs(mouseY - height / 2);
     if (dx <= clickW / 2 && dy <= clickH / 2) {
@@ -843,9 +880,9 @@ function keyPressed() {
   if (key === 'S' || key === 's') {
     wsSizeNorm = max(0, wsSizeNorm - 0.2);
   }
-  // G：按住时反向扭动并增强振幅
+  // G：按住时加速 t（tStepDenomCurrent=10）
   if (key === 'G' || key === 'g') {
-    gBoostActive = true;
+    gHoldActive = true;
   }
   // 空格：播放/暂停音频
   if (key === ' ') {
@@ -863,7 +900,7 @@ function keyPressed() {
 
 function keyReleased() {
   if (key === 'G' || key === 'g') {
-    gBoostActive = false;
+    gHoldActive = false;
   }
 }
 
