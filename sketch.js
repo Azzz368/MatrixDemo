@@ -14,8 +14,7 @@ let canvasRef;
 let sound;
 let isSoundLoaded = false;
 let isPlaying = false;
-let playButtonCenter = { x: 50, y: 50 };
-let playButtonRadius = 28;
+// 取消左上角播放按钮，改为空格键控制
 let amplitudeAnalyzer;
 let micLevelRaw = 0; // 复用命名：表示当前音频源的原始幅度
 let micLevelSmoothed = 0; // 复用命名：平滑后的幅度
@@ -75,6 +74,12 @@ let targetWaveDirY = 0.7071;
 let waveDirSmoothing = 0.20;
 const WAVE_SPATIAL_K = 0.0212; // ≈ 0.015 * sqrt(2)，匹配原 (x+y)*0.015 的空间频率
 
+// 新增：封面“stitch”动效参数（Maison Margiela 风格）
+const STITCH_LEN = 80;   // 矩形长度
+const STITCH_THICK = 8; // 矩形宽度（厚度）
+const STITCH_SMOOTH = 0.18; // 插值平滑
+let stitchParam = 0;     // 0→尾端在屏幕角；1→靠近中心矩形角
+
 // 新增：渲染优化（缓存摄像头点阵层、手势平滑）
 let bgLayer;
 let bgUpdateInterval = 4; // 每4帧重绘一次摄像头点阵
@@ -85,12 +90,20 @@ let indexDisplay = { x: 0, y: 0 };
 let handTargetsInitialized = false;
 let handSmoothing = 0.35; // 每帧向目标插值的比例
 
+// 新增：覆盖页与淡出逻辑
+let coverState = 'waiting'; // 'waiting' | 'fading' | 'done'
+let coverOpacity = 255;
+const COVER_FADE_MS = 2000;
+let coverFadeStartMs = 0;
+const COVER_CLICK_W = 800;
+const COVER_CLICK_H = 70;
+
 function preload() {
   handPose = ml5.handPose();
 }
 
 function setup() {
-  canvasRef = createCanvas(1920, 1080);
+  canvasRef = createCanvas(windowWidth, windowHeight);
   pixelDensity(1); // 降低高DPI额外开销
   noFill();
   stroke(255, 99);
@@ -112,6 +125,8 @@ function setup() {
 
   // 缓存层初始化
   bgLayer = createGraphics(width, height);
+  // 自适应：根据视口更新最大手势位移半径
+  maxCloudOffset = min(width, height) * 0.3;
 
   // 随机选出 15 个 glow 点
   let numGlow = 15;
@@ -160,6 +175,13 @@ function draw() {
     audioLevelPrev = cur;
   }
 
+  // 覆盖页：等待状态直接盖黑并显示提示，避免额外计算
+  if (coverState === 'waiting') {
+    background(0);
+    drawCoverOverlay();
+    return;
+  }
+
   // 新增：音量阈值触发全局半径扩张（阈值0.415 → 触发2.1x），并在1s内线性回落
   if (micLevelSmoothed >= 0.415) {
     radiusPulse = max(radiusPulse, 2.1);
@@ -199,8 +221,9 @@ function draw() {
   }
 
   drawMainScene();
-  drawPlayButton(); // 左上角播放按钮
+  // drawPlayButton(); // 已取消播放按钮
   drawHandUI();
+  drawCoverOverlay(); // 叠加覆盖页淡出
 }
 
 // --- 绘制主点云 ---
@@ -241,33 +264,113 @@ function drawAudioHUD() {
   text(`audio: ${micLevelSmoothed.toFixed(3)}  (${status})`, x, y);
 }
 
-// 左上角播放按钮（亮蓝色，透明度 50%）
-function drawPlayButton() {
-  resetMatrix();
-  push();
-  noStroke();
-  fill(0, 150, 255, 80); // 亮蓝，50% 透明
-  circle(playButtonCenter.x, playButtonCenter.y, playButtonRadius * 2);
+// 新增：覆盖页绘制与淡出
+function drawCoverOverlay() {
+  if (coverState === 'done') return;
 
-  // 绘制播放/暂停图标
-  fill(255);
-  if (isPlaying) {
-    // 暂停图标
-    const w = 6;
-    const h = 16;
-    rect(playButtonCenter.x - 8, playButtonCenter.y - h / 2, w, h, 2);
-    rect(playButtonCenter.x + 2, playButtonCenter.y - h / 2, w, h, 2);
-  } else {
-    // 播放图标（三角形）
-    const r = 12;
-    triangle(
-      playButtonCenter.x - r / 2, playButtonCenter.y - r,
-      playButtonCenter.x - r / 2, playButtonCenter.y + r,
-      playButtonCenter.x + r, playButtonCenter.y
-    );
+  let alpha = 255;
+  if (coverState === 'fading') {
+    const elapsed = millis() - coverFadeStartMs;
+    const k = constrain(elapsed / COVER_FADE_MS, 0, 1);
+    alpha = round(255 * (1 - k));
+    if (k >= 1) {
+      coverState = 'done';
+    }
   }
+
+  push();
+  resetMatrix();
+  noStroke();
+  fill(0, alpha);
+  rect(0, 0, width, height);
+
+  // 新增：stitch 动效（先绘制在文字下层）
+  drawCoverStitches(alpha);
+
+  // 提示文字（白色，Times New Roman，20px，居中）
+  fill(255, alpha);
+  textAlign(CENTER, CENTER);
+  textFont('Times New Roman');
+  const line1 = 'Drag music into the page, make sure the camera permission is turned on, and press F11 to enter full screen for better effect';
+  const line2 = 'when you are ready, click the middle area to start - Press spacebar to play/cancel the song.';
+  const size1 = 20;
+  const size2 = 30;
+  const gap = 10;
+  const blockH = size1 + gap + size2;
+  const yTop = height / 2 - blockH / 2;
+  const y1 = yTop + size1 / 2;
+  const y2 = yTop + size1 + gap + size2 / 2;
+  textSize(size1);
+  text(line1, width / 2, y1);
+  textSize(size2);
+  text(line2, width / 2, y2);
   pop();
 }
+
+// 新增：绘制封面四个“stitch”灰色矩形（随鼠标距离插值位置）
+function drawCoverStitches(alpha) {
+  // 自适应中心点击区域
+  const clickW = min(width * 0.6, COVER_CLICK_W);
+  const clickH = min(height * 0.25, COVER_CLICK_H);
+  const cx = width / 2;
+  const cy = height / 2;
+
+  // 计算鼠标与中心矩形的最短距离（在矩形内为0）
+  const left = cx - clickW / 2;
+  const right = cx + clickW / 2;
+  const top = cy - clickH / 2;
+  const bottom = cy + clickH / 2;
+  const dx = max(max(left - mouseX, 0), mouseX - right);
+  const dy = max(max(top - mouseY, 0), mouseY - bottom);
+  const distToRect = sqrt(dx * dx + dy * dy);
+  const distMax = 0.6 * sqrt(width * width + height * height);
+  const targetParam = constrain(distToRect / max(1, distMax), 0, 1);
+  stitchParam = lerp(stitchParam, targetParam, STITCH_SMOOTH);
+
+  // 四个屏幕角与中心矩形角
+  const cornersScreen = [
+    { x: 0, y: 0 },
+    { x: width, y: 0 },
+    { x: 0, y: height },
+    { x: width, y: height },
+  ];
+  const cornersRect = [
+    { x: left, y: top },
+    { x: right, y: top },
+    { x: left, y: bottom },
+    { x: right, y: bottom },
+  ];
+
+  noStroke();
+  fill(180, alpha); // 灰色
+  rectMode(CORNER);
+
+  for (let i = 0; i < 4; i++) {
+    const s = cornersScreen[i];
+    const r = cornersRect[i];
+    const dirX = r.x - s.x;
+    const dirY = r.y - s.y;
+    const segLen = max(1, sqrt(dirX * dirX + dirY * dirY));
+    const nx = dirX / segLen;
+    const ny = dirY / segLen;
+
+    // 使矩形“头部”不越过中心矩形角：尾端插值上限
+    const tMax = max(0, 1 - STITCH_LEN / segLen);
+    const tTail = stitchParam * tMax;
+
+    const tailX = s.x + tTail * dirX;
+    const tailY = s.y + tTail * dirY;
+
+    push();
+    translate(tailX, tailY);
+    rotate(atan2(ny, nx));
+    rect(0, -STITCH_THICK / 2, STITCH_LEN, STITCH_THICK, 3);
+    pop();
+  }
+}
+
+// 左上角播放按钮（亮蓝色，透明度 50%）
+function drawPlayButton() {}
 
 // 新增：摄像头灰度深度点阵背景
 function drawDepthDotBackground() {
@@ -709,20 +812,19 @@ function mousePressed() {
     userStartAudio();
   }
 
-  // 播放按钮命中检测
-  const dx = mouseX - playButtonCenter.x;
-  const dy = mouseY - playButtonCenter.y;
-  if (dx * dx + dy * dy <= playButtonRadius * playButtonRadius) {
-    if (isSoundLoaded && sound) {
-      if (sound.isPlaying()) {
-        sound.pause();
-        isPlaying = false;
-      } else {
-        sound.loop(); // 自动循环播放
-        isPlaying = true;
-      }
+  // 覆盖页点击：仅当处于等待状态时，点击屏幕中心区域开始淡出
+  if (coverState === 'waiting') {
+    const clickW = min(width * 0.6, COVER_CLICK_W);
+    const clickH = min(height * 0.25, COVER_CLICK_H);
+    const dx = abs(mouseX - width / 2);
+    const dy = abs(mouseY - height / 2);
+    if (dx <= clickW / 2 && dy <= clickH / 2) {
+      coverState = 'fading';
+      coverFadeStartMs = millis();
     }
   }
+
+  // 播放按钮已移除，改为空格键控制
 }
 
 // 新增：快捷键调节点阵密度与大小 + G 键反向增强扭动
@@ -745,10 +847,30 @@ function keyPressed() {
   if (key === 'G' || key === 'g') {
     gBoostActive = true;
   }
+  // 空格：播放/暂停音频
+  if (key === ' ') {
+    if (isSoundLoaded && sound) {
+      if (sound.isPlaying()) {
+        sound.pause();
+        isPlaying = false;
+      } else {
+        sound.loop();
+        isPlaying = true;
+      }
+    }
+  }
 }
 
 function keyReleased() {
   if (key === 'G' || key === 'g') {
     gBoostActive = false;
   }
+}
+
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+  // 重建缓存图层以匹配新尺寸
+  bgLayer = createGraphics(width, height);
+  // 根据新视口更新手势位移上限
+  maxCloudOffset = min(width, height) * 0.3;
 }
