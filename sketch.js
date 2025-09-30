@@ -22,6 +22,11 @@ let audioPhase = 0; // 将音量映射为背景 sin 的自变量
 let micPhaseMaxLevel = 0.3; // 将 0..0.3 的音量映射到 0..TWO_PI
 let soundLoadedAt = 0; // 新增：音频加载完成时间戳（用于边框淡入）
 
+// 新增：封面“未加载音频”提示下划线动画
+let underlineAnimStartMs = -1;
+const UNDERLINE_FADE_MS = 800;   // 0.8s 淡入/淡出
+const UNDERLINE_HOLD_MS = 2500;  // 2.5s 停留
+
 // 新增：音量剧烈程度与G键扭动增强
 let audioLevelPrev = 0;
 let audioSeverity = 0.6;       // 0..1，表示音量突变强度
@@ -97,8 +102,8 @@ let coverState = 'waiting'; // 'waiting' | 'fading' | 'done'
 let coverOpacity = 255;
 const COVER_FADE_MS = 2000;
 let coverFadeStartMs = 0;
-const COVER_CLICK_W = 1200;
-const COVER_CLICK_H = 300;
+const COVER_CLICK_W = 1300;
+const COVER_CLICK_H = 350;
 
 function preload() {
   handPose = ml5.handPose();
@@ -313,21 +318,105 @@ function drawCoverOverlay() {
   // 提示文字（白色，Times New Roman，20px，居中）
   fill(255, alpha);
   textAlign(CENTER, CENTER);
-  textFont('Times New Roman');
-  const line1 = 'Drag music into the page, make sure the camera permission is turned on, and press F11 to enter full screen for better effect';
+  textFont('Segoe UI Historic');
+  const line1 = 'Drag music（MP3） into the page, make sure the camera permission is turned on, and press F11 to enter full screen for better effect';
   const line2 = 'when you are ready, click the middle area to start - Press spacebar to play/cancel the song.';
-  const size1 = 20;
-  const size2 = 30;
-  const gap = 10;
-  const blockH = size1 + gap + size2;
-  const yTop = height / 2 - blockH / 2;
-  const y1 = yTop + size1 / 2;
-  const y2 = yTop + size1 + gap + size2 / 2;
-  textSize(size1);
-  text(line1, width / 2, y1);
-  textSize(size2);
-  text(line2, width / 2, y2);
+  const zh1 = '将音乐（MP3）拖入页面，确保已开启摄像头权限，并按 F11 进入全屏以获得更佳效果';
+  const zh2 = '准备好后，点击中间区域开始 - 按空格键播放/暂停歌曲。';
+  const sizeEn1 = 20;
+  const sizeEn2 = 30;
+  const sizeZh1 = 15; // 更新：仿宋 15
+  const sizeZh2 = 20; // 更新：仿宋 20
+  const gapPair = 6; // 英文与中文之间的小间距
+  const gap = 10;    // 两段之间的间距
+  const blockH = (sizeEn1 + gapPair + sizeZh1) + gap + (sizeEn2 + gapPair + sizeZh2);
+  const tipGapTop = 50;
+  const tipEnSize = 20;
+  const tipZhSize = 15;
+  // 提示信息拆分为两组（各含 EN+ZH 两行）
+  const tipsH = (tipEnSize + gapPair + tipZhSize) + gap + (tipEnSize + gapPair + tipZhSize);
+  const totalH = blockH + tipGapTop + tipsH;
+  const yTop = height / 2 - totalH / 2;
+ 
+  // 行中心位置计算（根据各自字号）
+  const yEn1 = yTop + sizeEn1 / 2;
+  const yZh1 = yTop + sizeEn1 + gapPair + sizeZh1 / 2;
+  const yEn2 = yTop + (sizeEn1 + gapPair + sizeZh1) + gap + sizeEn2 / 2;
+  const yZh2 = yTop + (sizeEn1 + gapPair + sizeZh1) + gap + sizeEn2 + gapPair + sizeZh2 / 2;
+ 
+  // 绘制英文与中文（字体分别为 Times / 仿宋）
+  textSize(sizeEn1);
+  textFont('Segoe UI Historic');
+  text(line1, width / 2, yEn1);
+  textSize(sizeZh1);
+  textFont('Microsoft YaHei');
+  text(zh1, width / 2, yZh1);
+ 
+  textSize(sizeEn2);
+  textFont('Segoe UI Historic');
+  text(line2, width / 2, yEn2);
+  textSize(sizeZh2);
+  textFont('Microsoft YaHei');
+  text(zh2, width / 2, yZh2);
+ 
+  // 50px 下方灰色 Tips（英文 + 中文，拆分两行）
+  const tipEn1 = 'You can use W and S to adjust the size of the dots. A and D to adjust the density of the dots.';
+  const tipZh1 = '可以用W，S调节点的大小。A，D调节点的密度。';
+  const tipEn2 = 'Pressing G at the same time can speed up the visual effect.';
+  const tipZh2 = '同时按下G可以加速视觉效果';
+  const yTipEn1 = yTop + blockH + tipGapTop + tipEnSize / 2;
+  const yTipZh1 = yTop + blockH + tipGapTop + tipEnSize + gapPair + tipZhSize / 2;
+  const yTipEn2 = yTipZh1 + tipZhSize / 2 + gap + tipEnSize / 2;
+  const yTipZh2 = yTipEn2 + tipEnSize / 2 + gapPair + tipZhSize / 2;
+  fill(180, alpha);
+  textSize(tipEnSize);
+  textFont('Segoe UI Historic');
+  text(tipEn1, width / 2, yTipEn1);
+  textSize(tipZhSize);
+  textFont('Microsoft YaHei');
+  text(tipZh1, width / 2, yTipZh1);
+  textSize(tipEnSize);
+  textFont('Segoe UI Historic');
+  text(tipEn2, width / 2, yTipEn2);
+  textSize(tipZhSize);
+  textFont('Microsoft YaHei');
+  text(tipZh2, width / 2, yTipZh2);
+
+  // 未加载音频时，下划线提醒动画（仅下划线“Drag music into the page”这段）
+  if (!isSoundLoaded) {
+    const a = underlineAlpha();
+    if (a > 0) {
+      textSize(sizeEn1);
+      textFont('Segoe UI Historic');
+      const dragText = 'Drag music into the page';
+      // 计算整行起始 X（居中对齐下的左边界）与子串宽度
+      const fullW = textWidth(line1);
+      const dragW = textWidth(dragText);
+      const xStart = width / 2 - fullW / 2; // 整行左起点
+      const yUnderline = yEn1 + sizeEn1 * 0.6;
+      stroke(220, 220, 220, alpha * a);
+      strokeWeight(1);
+      line(xStart, yUnderline, xStart + dragW, yUnderline);
+      noStroke();
+    }
+  }
+
   pop();
+}
+
+function underlineAlpha() {
+  if (underlineAnimStartMs < 0) return 0;
+  const t = millis() - underlineAnimStartMs;
+  const tIn = UNDERLINE_FADE_MS;
+  const tHold = UNDERLINE_HOLD_MS;
+  const tOut = UNDERLINE_FADE_MS;
+  if (t < 0) return 0;
+  if (t <= tIn) return t / tIn;
+  if (t <= tIn + tHold) return 1;
+  if (t <= tIn + tHold + tOut) return 1 - (t - tIn - tHold) / tOut;
+  // 动画结束，重置
+  underlineAnimStartMs = -1;
+  return 0;
 }
 
 // 新增：绘制封面四个“stitch”灰色矩形（随鼠标距离插值位置）
@@ -712,6 +801,8 @@ function handleFile(file) {
       sound = s;
       isSoundLoaded = true;
       isPlaying = false;
+      try { sound.setLoop(true); } catch (e) {}
+      try { sound.playMode && sound.playMode('sustain'); } catch (e) {}
       if (amplitudeAnalyzer) {
         amplitudeAnalyzer.setInput(sound);
       }
@@ -849,15 +940,20 @@ function mousePressed() {
     userStartAudio();
   }
 
-  // 覆盖页点击：仅当处于等待状态时，点击屏幕中心区域开始淡出
+  // 覆盖页点击：仅当处于等待状态时，点击屏幕中心区域
   if (coverState === 'waiting') {
     const clickW = min(width * 0.8, COVER_CLICK_W);
     const clickH = min(height * 0.35, COVER_CLICK_H);
     const dx = abs(mouseX - width / 2);
     const dy = abs(mouseY - height / 2);
     if (dx <= clickW / 2 && dy <= clickH / 2) {
-      coverState = 'fading';
-      coverFadeStartMs = millis();
+      if (!isSoundLoaded) {
+        // 未加载音频：触发下划线提示动画，不进入下一阶段
+        underlineAnimStartMs = millis();
+      } else {
+        coverState = 'fading';
+        coverFadeStartMs = millis();
+      }
     }
   }
 
@@ -884,14 +980,23 @@ function keyPressed() {
   if (key === 'G' || key === 'g') {
     gHoldActive = true;
   }
-  // 空格：播放/暂停音频
+  // 空格：播放/暂停音频（恢复时从暂停位置续播，保持循环与交互）
   if (key === ' ') {
     if (isSoundLoaded && sound) {
+      try { sound.playMode && sound.playMode('sustain'); } catch (e) {}
       if (sound.isPlaying()) {
         sound.pause();
         isPlaying = false;
       } else {
-        sound.loop();
+        // 如果之前未设置循环，这里确保开启循环标志，但不重置位置
+        try { sound.setLoop(true); } catch (e) {}
+        // 如果支持 isPaused 则直接续播
+        if (sound.isPaused && sound.isPaused()) {
+          sound.play();
+        } else {
+          // 未播放也未暂停（初次播放）
+          sound.play();
+        }
         isPlaying = true;
       }
     }
