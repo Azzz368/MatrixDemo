@@ -323,10 +323,10 @@ function drawCoverOverlay() {
   const line2 = 'when you are ready, click the middle area to start - Press spacebar to play/cancel the song.';
   const zh1 = '将音乐（MP3）拖入页面，确保已开启摄像头权限，并按 F11 进入全屏以获得更佳效果';
   const zh2 = '准备好后，点击中间区域开始 - 按空格键播放/暂停歌曲。';
-  const sizeEn1 = 20;
-  const sizeEn2 = 30;
-  const sizeZh1 = 15; // 更新：仿宋 15
-  const sizeZh2 = 20; // 更新：仿宋 20
+  const sizeEn1 = 15;
+  const sizeEn2 = 20;
+  const sizeZh1 = 13; // 更新：仿宋 15
+  const sizeZh2 = 18; // 更新：仿宋 20
   const gapPair = 6; // 英文与中文之间的小间距
   const gap = 10;    // 两段之间的间距
   const blockH = (sizeEn1 + gapPair + sizeZh1) + gap + (sizeEn2 + gapPair + sizeZh2);
